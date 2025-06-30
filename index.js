@@ -13,17 +13,20 @@ const botCache = {
     progressSettings: null,
     lastUpdate: null,
     urlCache: new Map(), // Cache extracted URLs
+    leaderboardMessages: new Map(), // Store leaderboard message IDs by guild
     clear: function() {
         this.channelCounts.clear();
         this.progressSettings = null;
         this.lastUpdate = null;
         this.urlCache.clear();
+        this.leaderboardMessages.clear();
         console.log('🗑️ Bot cache cleared completely');
     },
     getMemoryUsage: function() {
         return {
             channelCounts: this.channelCounts.size,
             urlCache: this.urlCache.size,
+            leaderboardMessages: this.leaderboardMessages.size,
             progressSettings: this.progressSettings ? 'Set' : 'Not set'
         };
     }
@@ -461,6 +464,144 @@ const createExcelFile = async (results, channelName) => {
     return buffer;
 };
 
+// Leaderboard functions
+const createLeaderboardEmbed = (channelCounts, currentPage = 1) => {
+    const sortedChannels = Array.from(channelCounts.entries())
+        .sort((a, b) => b[1] - a[1]); // Sort by views descending
+    
+    const totalPages = Math.ceil(sortedChannels.length / CONFIG.LEADERBOARD_PER_PAGE);
+    const startIndex = (currentPage - 1) * CONFIG.LEADERBOARD_PER_PAGE;
+    const endIndex = startIndex + CONFIG.LEADERBOARD_PER_PAGE;
+    const pageChannels = sortedChannels.slice(startIndex, endIndex);
+    
+    const totalViews = sortedChannels.reduce((sum, [, views]) => sum + views, 0);
+    
+    let leaderboardText = '';
+    pageChannels.forEach(([channel, views], index) => {
+        const rank = startIndex + index + 1;
+        leaderboardText += `${rank}. 📈 ${channel}: ${formatNumber(views)} views\n`;
+    });
+    
+    const embed = new EmbedBuilder()
+        .setTitle(`🏆 CHANNEL LEADERBOARD (Page ${currentPage}/${totalPages}) 🏆`)
+        .setDescription(leaderboardText || 'No channels found')
+        .setColor(0xFFD700) // Gold color
+        .addFields(
+            { 
+                name: '📊 **Total Stats**', 
+                value: `${totalViews.toLocaleString()} views across ${sortedChannels.length} channels`, 
+                inline: false 
+            }
+        )
+        .setTimestamp()
+        .setFooter({ 
+            text: `Use reactions to navigate • Updated automatically with /viewscount` 
+        });
+    
+    return { embed, totalPages, currentPage };
+};
+
+const createLeaderboardButtons = (currentPage, totalPages) => {
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+    
+    const row = new ActionRowBuilder();
+    
+    // First page button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('leaderboard_first')
+            .setLabel('⏮️')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(currentPage === 1)
+    );
+    
+    // Previous page button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('leaderboard_prev')
+            .setLabel('⬅️')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(currentPage === 1)
+    );
+    
+    // Refresh button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('leaderboard_refresh')
+            .setLabel('🔄')
+            .setStyle(ButtonStyle.Success)
+    );
+    
+    // Next page button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('leaderboard_next')
+            .setLabel('➡️')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(currentPage === totalPages)
+    );
+    
+    // Last page button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('leaderboard_last')
+            .setLabel('⏭️')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(currentPage === totalPages)
+    );
+    
+    return row;
+};
+
+const updateLeaderboard = async (guild, channelCounts, targetPage = 1) => {
+    try {
+        const leaderboardChannel = guild.channels.cache.find(ch => ch.name === CONFIG.LEADERBOARD_CHANNEL_NAME);
+        
+        if (!leaderboardChannel) {
+            console.log(`⚠️ Leaderboard channel #${CONFIG.LEADERBOARD_CHANNEL_NAME} not found`);
+            return null;
+        }
+        
+        const { embed, totalPages, currentPage } = createLeaderboardEmbed(channelCounts, targetPage);
+        const buttons = createLeaderboardButtons(currentPage, totalPages);
+        
+        // Check if we have an existing leaderboard message
+        const existingMessageId = botCache.leaderboardMessages.get(guild.id);
+        let leaderboardMessage = null;
+        
+        if (existingMessageId) {
+            try {
+                leaderboardMessage = await leaderboardChannel.messages.fetch(existingMessageId);
+            } catch (error) {
+                console.log('Previous leaderboard message not found, creating new one');
+                botCache.leaderboardMessages.delete(guild.id);
+            }
+        }
+        
+        if (leaderboardMessage) {
+            // Update existing message
+            await leaderboardMessage.edit({
+                embeds: [embed],
+                components: [buttons]
+            });
+            console.log(`✅ Updated leaderboard page ${currentPage}/${totalPages}`);
+        } else {
+            // Create new message
+            leaderboardMessage = await leaderboardChannel.send({
+                embeds: [embed],
+                components: [buttons]
+            });
+            botCache.leaderboardMessages.set(guild.id, leaderboardMessage.id);
+            console.log(`✅ Created new leaderboard page ${currentPage}/${totalPages}`);
+        }
+        
+        return leaderboardMessage;
+    } catch (error) {
+        console.error('❌ Error updating leaderboard:', error);
+        return null;
+    }
+};
+
 // Enhanced interaction timeout handler
 const withTimeoutProtection = async (interaction, handler) => {
     const startTime = Date.now();
@@ -574,60 +715,130 @@ const commands = [
 
 // Enhanced command handlers
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
+    if (interaction.isChatInputCommand()) {
+        const { commandName } = interaction;
 
-    const { commandName } = interaction;
+        try {
+            const permissionCheck = checkPermissions(interaction, commandName);
+            
+            if (!permissionCheck.allowed) {
+                const embed = new EmbedBuilder()
+                    .setTitle('❌ Access Denied')
+                    .setDescription(permissionCheck.reason)
+                    .addFields(
+                        { 
+                            name: '**Required Permissions**', 
+                            value: ROLE_CONFIG.CAMPAIGN_COMMANDS.includes(commandName) 
+                                ? `**${ROLE_CONFIG.CAMPAIGN_ROLES.join('** or **')}**`
+                                : '**Administrator**',
+                            inline: false 
+                        },
+                        { 
+                            name: '**Your Roles**', 
+                            value: interaction.member.roles.cache
+                                .filter(role => role.name !== '@everyone')
+                                .map(role => role.name)
+                                .join(', ') || 'No special roles',
+                            inline: false 
+                        }
+                    )
+                    .setColor(0xFF0000)
+                    .setTimestamp();
 
-    try {
-        const permissionCheck = checkPermissions(interaction, commandName);
-        
-        if (!permissionCheck.allowed) {
-            const embed = new EmbedBuilder()
-                .setTitle('❌ Access Denied')
-                .setDescription(permissionCheck.reason)
-                .addFields(
-                    { 
-                        name: '**Required Permissions**', 
-                        value: ROLE_CONFIG.CAMPAIGN_COMMANDS.includes(commandName) 
-                            ? `**${ROLE_CONFIG.CAMPAIGN_ROLES.join('** or **')}**`
-                            : '**Administrator**',
-                        inline: false 
-                    },
-                    { 
-                        name: '**Your Roles**', 
-                        value: interaction.member.roles.cache
-                            .filter(role => role.name !== '@everyone')
-                            .map(role => role.name)
-                            .join(', ') || 'No special roles',
-                        inline: false 
-                    }
-                )
-                .setColor(0xFF0000)
-                .setTimestamp();
+                await interaction.reply({ embeds: [embed], ephemeral: true });
+                return;
+            }
 
-            await interaction.reply({ embeds: [embed], ephemeral: true });
-            return;
+            console.log(`✅ Command ${commandName} used by ${interaction.user.tag} (${permissionCheck.reason})`);
+
+            // Execute commands with timeout protection
+            if (commandName === 'viewscount') {
+                await withTimeoutProtection(interaction, () => handleViewsCount(interaction));
+            } else if (commandName === 'progressbar') {
+                await withTimeoutProtection(interaction, () => handleProgressBar(interaction));
+            } else if (commandName === 'updateprogress') {
+                await withTimeoutProtection(interaction, () => handleUpdateProgress(interaction));
+            } else if (commandName === 'status') {
+                await handleStatus(interaction);
+            } else if (commandName === 'clearcache') {
+                await handleClearCache(interaction);
+            }
+        } catch (error) {
+            console.error(`❌ Error handling command ${commandName}:`, error);
+            // Error handling is done in withTimeoutProtection
         }
-
-        console.log(`✅ Command ${commandName} used by ${interaction.user.tag} (${permissionCheck.reason})`);
-
-        // Execute commands with timeout protection
-        if (commandName === 'viewscount') {
-            await withTimeoutProtection(interaction, () => handleViewsCount(interaction));
-        } else if (commandName === 'progressbar') {
-            await withTimeoutProtection(interaction, () => handleProgressBar(interaction));
-        } else if (commandName === 'updateprogress') {
-            await withTimeoutProtection(interaction, () => handleUpdateProgress(interaction));
-        } else if (commandName === 'status') {
-            await handleStatus(interaction);
-        } else if (commandName === 'clearcache') {
-            await handleClearCache(interaction);
+    } else if (interaction.isButton()) {
+        // Handle leaderboard button interactions
+        if (interaction.customId.startsWith('leaderboard_')) {
+            await handleLeaderboardButtons(interaction);
         }
-    } catch (error) {
-        console.error(`❌ Error handling command ${commandName}:`, error);
-        // Error handling is done in withTimeoutProtection
     }
 });
+
+// Leaderboard button handler
+const handleLeaderboardButtons = async (interaction) => {
+    try {
+        await interaction.deferUpdate();
+        
+        const viewsChannel = interaction.guild.channels.cache.find(ch => ch.name === CONFIG.VIEWS_CHANNEL_NAME);
+        if (!viewsChannel) {
+            await interaction.followUp({ content: `❌ Views channel #${CONFIG.VIEWS_CHANNEL_NAME} not found.`, ephemeral: true });
+            return;
+        }
+        
+        // Get current page from embed title
+        const currentEmbed = interaction.message.embeds[0];
+        const titleMatch = currentEmbed.title.match(/Page (\d+)\/(\d+)/);
+        const currentPage = titleMatch ? parseInt(titleMatch[1]) : 1;
+        const totalPages = titleMatch ? parseInt(titleMatch[2]) : 1;
+        
+        let targetPage = currentPage;
+        
+        switch (interaction.customId) {
+            case 'leaderboard_first':
+                targetPage = 1;
+                break;
+            case 'leaderboard_prev':
+                targetPage = Math.max(1, currentPage - 1);
+                break;
+            case 'leaderboard_next':
+                targetPage = Math.min(totalPages, currentPage + 1);
+                break;
+            case 'leaderboard_last':
+                targetPage = totalPages;
+                break;
+            case 'leaderboard_refresh':
+                // Force refresh data
+                const channelCounts = await parseViewsFromChannel(viewsChannel, false);
+                const { embed, totalPages: newTotalPages } = createLeaderboardEmbed(channelCounts, currentPage);
+                const buttons = createLeaderboardButtons(currentPage, newTotalPages);
+                
+                await interaction.editReply({
+                    embeds: [embed],
+                    components: [buttons]
+                });
+                return;
+        }
+        
+        // Get fresh channel counts for navigation
+        const channelCounts = await parseViewsFromChannel(viewsChannel);
+        const { embed, totalPages: newTotalPages } = createLeaderboardEmbed(channelCounts, targetPage);
+        const buttons = createLeaderboardButtons(targetPage, newTotalPages);
+        
+        await interaction.editReply({
+            embeds: [embed],
+            components: [buttons]
+        });
+        
+        console.log(`📊 Leaderboard navigated to page ${targetPage}/${newTotalPages} by ${interaction.user.tag}`);
+        
+    } catch (error) {
+        console.error('❌ Error handling leaderboard buttons:', error);
+        if (!interaction.replied) {
+            await interaction.reply({ content: '❌ An error occurred while updating the leaderboard.', ephemeral: true });
+        }
+    }
+};
 
 const handleClearCache = async (interaction) => {
     await interaction.deferReply();
@@ -653,6 +864,7 @@ const handleClearCache = async (interaction) => {
             .addFields(
                 { name: '**Before - Channel Counts**', value: beforeCacheInfo.channelCounts.toString(), inline: true },
                 { name: '**Before - URL Cache**', value: beforeCacheInfo.urlCache.toString(), inline: true },
+                { name: '**Before - Leaderboards**', value: beforeCacheInfo.leaderboardMessages.toString(), inline: true },
                 { name: '**Progress Settings**', value: beforeCacheInfo.progressSettings, inline: true },
                 { name: '**Memory Before**', value: `${beforeMemory.toFixed(1)} MB`, inline: true },
                 { name: '**Memory After**', value: `${afterMemory.toFixed(1)} MB`, inline: true },
@@ -714,17 +926,14 @@ const handleUpdateProgress = async (interaction) => {
                         name: '**Voice Channel**',
                         value: `Updated: ${progressChannel}`,
                         inline: false
+                    },
+                    {
+                        name: '**Data Source**',
+                        value: `Synced from #${CONFIG.VIEWS_CHANNEL_NAME} (${channelCounts.size} channels tracked)`,
+                        inline: false
                     }
                 )
                 .setTimestamp();
-
-            if (channelCounts.size > 0) {
-                let recentUpdates = '';
-                channelCounts.forEach((views, channel) => {
-                    recentUpdates += `📈 ${channel}: ${formatNumber(views)} views\n`;
-                });
-                embed.addFields({ name: '**Current Channel Counts**', value: recentUpdates, inline: false });
-            }
 
             await interaction.editReply({ embeds: [embed] });
         } else {
@@ -755,6 +964,7 @@ const handleStatus = async (interaction) => {
             { name: '🏠 Guilds', value: client.guilds.cache.size.toString(), inline: true },
             { name: '📦 Channel Cache', value: `${cacheInfo.channelCounts} items`, inline: true },
             { name: '🔗 URL Cache', value: `${cacheInfo.urlCache} items`, inline: true },
+            { name: '📊 Leaderboard Cache', value: `${cacheInfo.leaderboardMessages} guilds`, inline: true },
             { name: '🎯 Progress Settings', value: cacheInfo.progressSettings, inline: true },
             { name: '🕒 Last Cache Update', value: botCache.lastUpdate ? new Date(botCache.lastUpdate).toLocaleString() : 'Never', inline: false },
             { name: '🔧 Environment', value: 'Koyeb Hosting', inline: false }
@@ -968,25 +1178,56 @@ const handleViewsCount = async (interaction) => {
             )
             .setTimestamp();
 
-        // Add page breakdown
-        let pageBreakdown = '';
-        Array.from(pageStats.entries())
-            .sort((a, b) => b[1].views - a[1].views)
-            .forEach(([username, stats]) => {
-                pageBreakdown += `@${username} - ${stats.videos} videos - ${formatNumber(stats.views)} views\n`;
-            });
+        // Add page breakdown with character limit protection
+        if (pageStats.size > 0) {
+            let pageBreakdown = '';
+            const sortedPages = Array.from(pageStats.entries())
+                .sort((a, b) => b[1].views - a[1].views);
+            
+            let charCount = 0;
+            const maxChars = 950; // Leave buffer for Discord's 1024 limit
+            
+            for (const [username, stats] of sortedPages) {
+                const line = `@${username} - ${stats.videos} videos - ${formatNumber(stats.views)} views\n`;
+                if (charCount + line.length > maxChars) {
+                    const remaining = sortedPages.length - pageBreakdown.split('\n').filter(l => l.trim()).length;
+                    if (remaining > 0) {
+                        pageBreakdown += `... and ${remaining} more pages`;
+                    }
+                    break;
+                }
+                pageBreakdown += line;
+                charCount += line.length;
+            }
 
-        if (pageBreakdown) {
-            embed.addFields({ name: '**📋 Breakdown by Page**', value: pageBreakdown, inline: false });
+            if (pageBreakdown.trim()) {
+                embed.addFields({ name: '**📋 Breakdown by Page**', value: pageBreakdown, inline: false });
+            }
         }
 
-        // Add top 10 videos
+        // Add top 10 videos with character limit protection
         if (top10Videos.length > 0) {
             let top10Text = '';
-            top10Videos.forEach((video, index) => {
-                top10Text += `${index + 1}. [${formatNumber(video.views)} views](${video.url})\n`;
-            });
-            embed.addFields({ name: '**🏆 Top 10 Most Viewed Videos**', value: top10Text, inline: false });
+            let charCount = 0;
+            const maxChars = 950; // Leave buffer for Discord's 1024 limit
+            
+            for (let i = 0; i < top10Videos.length; i++) {
+                const video = top10Videos[i];
+                const line = `${i + 1}. [${formatNumber(video.views)} views](${video.url})\n`;
+                if (charCount + line.length > maxChars) {
+                    const remaining = top10Videos.length - i;
+                    if (remaining > 0) {
+                        top10Text += `... and ${remaining} more videos`;
+                    }
+                    break;
+                }
+                top10Text += line;
+                charCount += line.length;
+            }
+            
+            if (top10Text.trim()) {
+                embed.addFields({ name: '**🏆 Top 10 Most Viewed Videos**', value: top10Text, inline: false });
+            }
         }
 
         // Create Excel file
@@ -1024,6 +1265,10 @@ const handleViewsCount = async (interaction) => {
                 progressSettings.target
             );
             console.log(`✅ Progress voice channel updated with total: ${newTotalViews.toLocaleString()}`);
+            
+            // Update leaderboard as well
+            await updateLeaderboard(interaction.guild, channelCounts, 1);
+            console.log(`📊 Leaderboard updated automatically`);
         }
 
         console.log(`🎉 Sending final response to user...`);
@@ -1092,17 +1337,14 @@ const handleProgressBar = async (interaction) => {
                         name: '**Voice Channel**',
                         value: `Progress is now displayed in: ${progressChannel}`,
                         inline: false
+                    },
+                    {
+                        name: '**Data Source**',
+                        value: `Automatically synced from #${CONFIG.VIEWS_CHANNEL_NAME} channel`,
+                        inline: false
                     }
                 )
                 .setTimestamp();
-
-            if (channelCounts.size > 0) {
-                let recentUpdates = '';
-                channelCounts.forEach((views, channel) => {
-                    recentUpdates += `📈 ${channel}: ${formatNumber(views)} views\n`;
-                });
-                embed.addFields({ name: '**Recent Channel Counts**', value: recentUpdates, inline: false });
-            }
 
             await interaction.editReply({ embeds: [embed] });
         } else {
