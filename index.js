@@ -555,15 +555,21 @@ const createLeaderboardButtons = (currentPage, totalPages) => {
 
 const updateLeaderboard = async (guild, channelCounts, targetPage = 1) => {
     try {
+        console.log(`🔍 Looking for leaderboard channel: #${CONFIG.LEADERBOARD_CHANNEL_NAME}`);
         const leaderboardChannel = guild.channels.cache.find(ch => ch.name === CONFIG.LEADERBOARD_CHANNEL_NAME);
         
         if (!leaderboardChannel) {
-            console.log(`⚠️ Leaderboard channel #${CONFIG.LEADERBOARD_CHANNEL_NAME} not found`);
+            console.log(`⚠️ Leaderboard channel #${CONFIG.LEADERBOARD_CHANNEL_NAME} not found in guild: ${guild.name}`);
+            console.log(`📋 Available channels: ${guild.channels.cache.map(ch => ch.name).join(', ')}`);
             return null;
         }
         
+        console.log(`✅ Found leaderboard channel: ${leaderboardChannel.name}`);
+        
         const { embed, totalPages, currentPage } = createLeaderboardEmbed(channelCounts, targetPage);
         const buttons = createLeaderboardButtons(currentPage, totalPages);
+        
+        console.log(`📊 Creating leaderboard page ${currentPage}/${totalPages} with ${channelCounts.size} channels`);
         
         // Check if we have an existing leaderboard message
         const existingMessageId = botCache.leaderboardMessages.get(guild.id);
@@ -572,8 +578,9 @@ const updateLeaderboard = async (guild, channelCounts, targetPage = 1) => {
         if (existingMessageId) {
             try {
                 leaderboardMessage = await leaderboardChannel.messages.fetch(existingMessageId);
+                console.log(`📝 Found existing leaderboard message: ${existingMessageId}`);
             } catch (error) {
-                console.log('Previous leaderboard message not found, creating new one');
+                console.log('📝 Previous leaderboard message not found, creating new one');
                 botCache.leaderboardMessages.delete(guild.id);
             }
         }
@@ -592,13 +599,13 @@ const updateLeaderboard = async (guild, channelCounts, targetPage = 1) => {
                 components: [buttons]
             });
             botCache.leaderboardMessages.set(guild.id, leaderboardMessage.id);
-            console.log(`✅ Created new leaderboard page ${currentPage}/${totalPages}`);
+            console.log(`✅ Created new leaderboard page ${currentPage}/${totalPages} with message ID: ${leaderboardMessage.id}`);
         }
         
         return leaderboardMessage;
     } catch (error) {
         console.error('❌ Error updating leaderboard:', error);
-        return null;
+        throw error; // Re-throw for better error handling
     }
 };
 
@@ -1267,8 +1274,18 @@ const handleViewsCount = async (interaction) => {
             console.log(`✅ Progress voice channel updated with total: ${newTotalViews.toLocaleString()}`);
             
             // Update leaderboard as well
-            await updateLeaderboard(interaction.guild, channelCounts, 1);
-            console.log(`📊 Leaderboard updated automatically`);
+            try {
+                await updateLeaderboard(interaction.guild, channelCounts, 1);
+                console.log(`📊 Leaderboard updated automatically`);
+            } catch (leaderboardError) {
+                console.error(`❌ Failed to update leaderboard:`, leaderboardError);
+                
+                // Send error to execution channel
+                const executionChannel = interaction.guild.channels.cache.find(ch => ch.name === CONFIG.EXECUTION_CHANNEL_NAME);
+                if (executionChannel) {
+                    await executionChannel.send(`❌ **Leaderboard Update Failed:**\n\`\`\`${leaderboardError.message}\`\`\``);
+                }
+            }
         }
 
         console.log(`🎉 Sending final response to user...`);
