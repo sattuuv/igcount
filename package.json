@@ -1,12 +1,26 @@
 {
   "name": "instagram-views-discord-bot",
   "version": "1.0.0",
-  "description": "Discord bot for counting Instagram views with progress tracking",
+  "description": "Discord bot for Instagram views counting with progress tracking",
   "main": "index.js",
   "scripts": {
-    "start": "node --expose-gc index.js",
-    "dev": "nodemon --expose-gc index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "build": "npm install",
+    "postinstall": "echo 'Dependencies installed successfully'"
+  },
+  "engines": {
+    "node": "18.x",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "discord.js": "14.14.1",
+    "apify-client": "2.8.1",
+    "exceljs": "4.4.0",
+    "express": "4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "3.0.2"
   },
   "keywords": [
     "discord",
@@ -17,20 +31,12 @@
   ],
   "author": "Your Name",
   "license": "MIT",
-  "dependencies": {
-    "discord.js": "^14.14.1",
-    "apify-client": "^2.8.1",
-    "exceljs": "^4.4.0",
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "repository": {
     "type": "git",
-    "url": "your-repo-url"
-  }
+    "url": "https://github.com/sattuuv/igcount.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sattuuv/igcount/issues"
+  },
+  "homepage": "https://github.com/sattuuv/igcount#readme"
 }
