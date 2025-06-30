@@ -51,6 +51,58 @@ const CONFIG = {
     PROGRESS_VOICE_CHANNEL_PREFIX: '📊 Progress: '
 };
 
+// Role-based permission configuration
+const ROLE_CONFIG = {
+    CAMPAIGN_ROLES: ['Campaign Manager', 'Social Media Manager'], // Allowed roles for campaign commands
+    ADMIN_ONLY: ['status'], // Commands only for administrators
+    CAMPAIGN_COMMANDS: ['viewscount', 'progressbar'], // Commands for campaign managers
+};
+
+// Permission checker function
+const checkPermissions = (interaction, commandName) => {
+    const member = interaction.member;
+    
+    // Server owner always has access
+    if (interaction.guild.ownerId === member.id) {
+        return { allowed: true, reason: 'Server Owner' };
+    }
+    
+    // Administrator always has access
+    if (member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return { allowed: true, reason: 'Administrator' };
+    }
+    
+    // Check admin-only commands
+    if (ROLE_CONFIG.ADMIN_ONLY.includes(commandName)) {
+        return { 
+            allowed: false, 
+            reason: 'This command requires Administrator permissions.' 
+        };
+    }
+    
+    // Check campaign commands
+    if (ROLE_CONFIG.CAMPAIGN_COMMANDS.includes(commandName)) {
+        const hasRole = ROLE_CONFIG.CAMPAIGN_ROLES.some(roleName => {
+            return member.roles.cache.some(role => role.name === roleName);
+        });
+        
+        if (hasRole) {
+            const userRole = ROLE_CONFIG.CAMPAIGN_ROLES.find(roleName => {
+                return member.roles.cache.some(role => role.name === roleName);
+            });
+            return { allowed: true, reason: `Role: ${userRole}` };
+        }
+        
+        return { 
+            allowed: false, 
+            reason: `You need one of these roles: ${ROLE_CONFIG.CAMPAIGN_ROLES.join(', ')}` 
+        };
+    }
+    
+    // Default allow for other commands
+    return { allowed: true, reason: 'Default Access' };
+};
+
 // Utility functions
 const formatNumber = (num) => {
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
@@ -335,7 +387,7 @@ const createExcelFile = async (results, channelName) => {
     return buffer;
 };
 
-// Slash command definitions
+// Updated slash command definitions (removed admin requirement for campaign commands)
 const commands = [
     new SlashCommandBuilder()
         .setName('viewscount')
@@ -344,7 +396,7 @@ const commands = [
             option.setName('channel')
                 .setDescription('The channel to analyze')
                 .setRequired(true))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+        .setDefaultMemberPermissions(null), // Remove admin requirement
 
     new SlashCommandBuilder()
         .setName('progressbar')
@@ -357,21 +409,56 @@ const commands = [
             option.setName('target')
                 .setDescription('Target view count')
                 .setRequired(true))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+        .setDefaultMemberPermissions(null), // Remove admin requirement
 
     new SlashCommandBuilder()
         .setName('status')
         .setDescription('Check bot status and health')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator) // Keep admin only
 ];
 
-// Command handlers
+// Enhanced command handlers with role checking
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
 
     try {
+        // Check permissions
+        const permissionCheck = checkPermissions(interaction, commandName);
+        
+        if (!permissionCheck.allowed) {
+            const embed = new EmbedBuilder()
+                .setTitle('❌ Access Denied')
+                .setDescription(permissionCheck.reason)
+                .addFields(
+                    { 
+                        name: '**Required Permissions**', 
+                        value: ROLE_CONFIG.CAMPAIGN_COMMANDS.includes(commandName) 
+                            ? `**${ROLE_CONFIG.CAMPAIGN_ROLES.join('** or **')}**`
+                            : '**Administrator**',
+                        inline: false 
+                    },
+                    { 
+                        name: '**Your Roles**', 
+                        value: interaction.member.roles.cache
+                            .filter(role => role.name !== '@everyone')
+                            .map(role => role.name)
+                            .join(', ') || 'No special roles',
+                        inline: false 
+                    }
+                )
+                .setColor(0xFF0000)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed], ephemeral: true });
+            return;
+        }
+
+        // Log successful command usage
+        console.log(`✅ Command ${commandName} used by ${interaction.user.tag} (${permissionCheck.reason})`);
+
+        // Execute commands
         if (commandName === 'viewscount') {
             await handleViewsCount(interaction);
         } else if (commandName === 'progressbar') {
@@ -380,7 +467,7 @@ client.on('interactionCreate', async interaction => {
             await handleStatus(interaction);
         }
     } catch (error) {
-        console.error(`Error handling command ${commandName}:`, error);
+        console.error(`❌ Error handling command ${commandName}:`, error);
         if (!interaction.replied && !interaction.deferred) {
             await interaction.reply('❌ An error occurred while processing your command.');
         } else {
